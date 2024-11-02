@@ -1,5 +1,10 @@
 import {GetObjectCommand, S3Client} from "@aws-sdk/client-s3";
 import {GetTranscriptionJobCommand, StartTranscriptionJobCommand, TranscribeClient} from "@aws-sdk/client-transcribe";
+import { spawn } from 'child_process';
+import path from 'path';
+
+// Path to the Python script
+const PYTHON_SCRIPT_PATH = path.join(process.cwd(), 'src/app/api/Script/generate_summary.py');
 
 function getClient() {
   return new TranscribeClient({
@@ -75,6 +80,43 @@ async function getTranscriptionFile(filename) {
   return null;
 }
 
+async function generateSummary(filename) {
+  return new Promise((resolve, reject) => {
+    const summaryFilePath = path.join(process.cwd(), 'src/app/api/summaries', `${filename}.docx`);
+
+     // Check if the summaries directory exists, if not, create it
+     if (!fs.existsSync(summariesDir)) {
+      fs.mkdirSync(summariesDir, { recursive: true });
+    }
+    
+    // Retrieve the API key from environment variables
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    // Spawn the Python process with the API key as an environment variable
+    const pythonProcess = spawn('python3', [PYTHON_SCRIPT_PATH, summaryFilePath], {
+      env: { ...process.env, OPENAI_API_KEY: apiKey },
+    });
+
+    let output = '';
+    pythonProcess.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    pythonProcess.stderr.on('data', (data) => {
+      console.error(`Error from summary script: ${data}`);
+    });
+
+    pythonProcess.on('close', (code) => {
+      if (code === 0) {
+        console.log('Summary generation complete.');
+        resolve(output.trim());
+      } else {
+        reject(new Error(`Summary generation failed with exit code ${code}`));
+      }
+    });
+  });
+}
+
 export async function GET(req) {
   const url = new URL(req.url);
   const searchParams = new URLSearchParams(url.searchParams);
@@ -83,19 +125,22 @@ export async function GET(req) {
   // find ready transcription
   const transcription = await getTranscriptionFile(filename);
   if (transcription) {
+    // Generate summary if transcription is ready
+    const summary = await generateSummary(filename);
+    
     return Response.json({
-      status:'COMPLETED',
+      status: 'COMPLETED',
       transcription,
+      summary,
     });
   }
 
   // check if already transcribing
   const existingJob = await getJob(filename);
-
   if (existingJob) {
     return Response.json({
       status: existingJob.TranscriptionJob.TranscriptionJobStatus,
-    })
+    });
   }
 
   // creating new transcription job
